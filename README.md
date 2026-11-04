@@ -30,6 +30,8 @@ Automated bank transaction sync from [Plaid](https://plaid.com) to [Actual Budge
 - Use the **Repair** button (Link update mode) for broken logins — it reuses the existing connection; re-linking from scratch burns a slot permanently
 - The admin UI shows your `N / 10` slot usage
 
+> **Not eligible for the Trial plan?** Teams created before April 15, 2026, or with a pending/approved Production application, can't get it and can't switch to it. Older teams are on **Limited Production** (the previous free tier: live data, but a capped number of API calls) or a paid plan — this app works the same either way. Submitting a Production access application is one-way: you can't return to the Trial plan afterward.
+
 ## 🚀 Quick Start (5 Minutes)
 
 ### Prerequisites
@@ -40,8 +42,9 @@ Automated bank transaction sync from [Plaid](https://plaid.com) to [Actual Budge
 
 ### Step 1: Get Plaid Credentials
 
-1. Sign up at the [Plaid Dashboard](https://dashboard.plaid.com/signup)
-2. Go to **Developers → Keys**: copy your **client ID** and the **Sandbox secret** (grab the Production secret later, once you've tested)
+1. Sign up at the [Plaid Dashboard](https://dashboard.plaid.com/signup) and verify your email
+2. Apply for the free **Trial plan** — the button on the Dashboard home page, or [dashboard.plaid.com/trial-plan](https://dashboard.plaid.com/trial-plan). Signing up alone only gives you Sandbox; Plaid emails you once Production is enabled, and until then only the Sandbox secret works
+3. Go to **Developers → Keys**: copy your **client ID** and the **Sandbox secret**. The Production secret is on the same page — it's a different value, and only works once Production is enabled
 
 ### Step 2: Run the Container
 
@@ -63,7 +66,7 @@ docker compose up -d --build
 4. **`/admin` → Account Mappings**: pair each bank account with an Actual account (create new ones on the fly)
 5. Hit **Sync Now** — done 🎉
 
-> First sync note: right after linking, Plaid may still be preparing transaction history. If the first sync reports nothing, wait a minute and sync again — history depth is controlled by the "days requested" setting (default 90, up to 730).
+> First sync note: Plaid loads history in two phases after linking — an initial pull of recent transactions, then a historical pull back to your "days requested" setting (default 90, up to 730). If the first sync comes back empty or short, wait a bit and sync again; the more history you request, the longer the historical pull takes.
 
 ## 🛠️ How the Sync Works
 
@@ -95,6 +98,7 @@ Each sync run, per bank connection (Plaid "Item"):
 - **Credit/loan balances**: Plaid reports owed amounts as positive; Actual as negative. Flipped during reconcile.
 - **Pending transactions**: imported as uncleared; automatically replaced when they post.
 - **Payees**: Plaid's enriched `merchant_name` when available, raw description otherwise.
+- **Balances**: reconcile uses Plaid's cached balances (the free endpoint), which Plaid keeps at least as fresh as the last transaction update — not a live query to the bank.
 
 ## 🐳 Docker Deployment
 
@@ -163,6 +167,8 @@ Bank connections (`items`, holding access tokens and sync cursors) and account `
 | Twice daily (8 AM, 8 PM) | `0 8,20 * * *` |
 | Weekly (Monday midnight) | `0 0 * * 1` |
 
+Plaid checks each institution for new transactions roughly 1–4 times per day, so syncing more often than every few hours won't surface anything new.
+
 ## 📊 Admin Dashboard
 
 Open `http://localhost:8001/admin`:
@@ -222,11 +228,18 @@ Duplicate protection: incoming transactions carry stable Plaid IDs and are also 
 
 ### First sync returns 0 transactions
 
-Plaid prepares transaction history in the background after linking — typically 30 days almost immediately, full history within a minute or two. Sync again shortly.
+Plaid prepares history in two phases after linking: an initial pull of recent transactions, then the full historical pull. The sync response reports where it is (`NOT_READY` → `INITIAL_UPDATE_COMPLETE` → `HISTORICAL_UPDATE_COMPLETE`), and the app skips persisting the cursor until data is ready. Sync again after a short wait — larger "days requested" values take longer.
 
 ### OAuth banks (Chase, Bank of America, …) won't connect
 
-OAuth institutions require an **HTTPS redirect URI** registered in the Plaid Dashboard (Developers → API → Allowed redirect URIs). Put the app behind a reverse proxy with TLS and register `https://your-domain/connect`. Non-OAuth banks work over plain HTTP.
+On Plaid's side, OAuth institutions need two things in Production:
+
+1. An **HTTPS redirect URI** registered in the Plaid Dashboard (Developers → API → Allowed redirect URIs), e.g. `https://your-domain/connect` behind a reverse proxy with TLS. Non-OAuth banks work over plain HTTP.
+2. **Per-institution OAuth approval** from Plaid, tracked on the Dashboard's OAuth institutions page. Production access must be enabled first; some institutions (e.g. Charles Schwab) take up to 5 business days after that. Trial plan users are exempt from the Chase security questionnaire and the compliance registration until they upgrade.
+
+Sandbox needs neither — OAuth flows work there without approval and accept plain `http://localhost` redirect URIs.
+
+> **Current limitation:** this app does not yet pass a `redirect_uri` when creating Link tokens, which Plaid requires for OAuth institutions on the web. Until that's added, OAuth banks can't be linked even with the Dashboard steps above done.
 
 ### "ITEM_LOGIN_REQUIRED" / Needs reconnect
 
@@ -234,12 +247,14 @@ The bank login broke upstream. Click **Repair** on the connection — this launc
 
 ### Hit the 10-connection Trial limit
 
-The limit is lifetime (removals don't refund). Upgrade to Plaid's Pay-as-you-go plan (no minimum) or contact Plaid.
+The limit is lifetime (removals don't refund). Upgrade to Plaid's **Pay-as-you-go** plan (no minimum, self-service in the Dashboard) or contact Plaid about Growth/Custom plans. When you apply, request **Transactions** and **Balance**: after upgrading you keep Production access only to the products on your request form, and subscription products already on your Items start billing.
 
 ### Sandbox testing tips
 
-- Realistic data: link with username `user_transactions_dynamic` (any password)
-- Force a broken login to test Repair: `POST https://sandbox.plaid.com/sandbox/item/reset_login`
+- Realistic data: link with username `user_transactions_dynamic` (any non-blank password)
+- Use a non-OAuth test bank such as First Platypus Bank (`ins_109508`) — special test usernames are ignored at OAuth sandbox institutions
+- Sandbox Items automatically enter `ITEM_LOGIN_REQUIRED` 30 days after creation, so a **Needs reconnect** flag in Sandbox is expected — use it to try Repair
+- Force a broken login immediately: `POST https://sandbox.plaid.com/sandbox/item/reset_login`
 - Seed new transactions: `POST https://sandbox.plaid.com/sandbox/transactions/create`
 
 ### Actual Budget connection fails
