@@ -55,6 +55,9 @@ docker compose up -d --build
 
 1. Open `http://localhost:8001` — you'll be redirected to the setup flow
 2. **`/connect`**: enter your Plaid client ID + secret + environment, then link a bank through Plaid Link
+   - The credentials are checked against Plaid **before** they're saved — a wrong secret or mismatched environment is rejected and nothing is written
+   - Secrets are per-environment: the Sandbox secret only works with Sandbox, the Production secret only with Production
+   - Need to change them later? Use **Change Plaid credentials** on `/connect` or the **Configuration** tab in `/admin`
    - Sandbox: pick any institution, log in with `user_good` / `pass_good` (or username `user_transactions_dynamic` for realistic transaction data)
 3. **`/setup`**: enter your Actual Budget server URL, password, and budget Sync ID
 4. **`/admin` → Account Mappings**: pair each bank account with an Actual account (create new ones on the fly)
@@ -134,7 +137,9 @@ docker run -d \
 
 ## 🔧 Configuration
 
-Everything is stored in `config/config.json` (created by the setup wizard). Environment variables act as fallbacks when a config value is missing:
+Everything is stored in `config/config.json` (created by the setup wizard). Environment variables act as fallbacks when a config value is missing — a value in `config.json` always wins, so once credentials have been saved through the UI, env vars for the same keys are ignored.
+
+To configure with env vars instead of the UI, uncomment the matching lines under `environment:` in `docker-compose.yml`. A `.env` file alone isn't enough: it's excluded from the image, so the container only sees variables compose passes through.
 
 | Env var | config.json equivalent |
 |---|---|
