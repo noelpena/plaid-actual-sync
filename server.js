@@ -147,8 +147,7 @@ async function validatePlaidCredentials(candidate) {
   } catch (error) {
     let msg = `Plaid rejected these credentials (${candidate.env}): ${errMsg(error)}.`;
     if (error instanceof PlaidApiError && error.errorCode === "INVALID_API_KEYS") {
-      msg += ` Secrets are per-environment — make sure this is the ${candidate.env} secret from Developers → Keys` +
-        (candidate.env === "production" ? ", and that Production access has been granted on your Plaid account." : ".");
+      msg += ` Secrets are per-environment — make sure this is the ${candidate.env} secret from Developers → Keys.`;
     }
     return msg + " Nothing was saved.";
   }
