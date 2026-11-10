@@ -213,9 +213,6 @@ async function testActualConnection() {
   }
 }
 
-// Track which sensitive fields have been modified
-const modifiedFields = new Set();
-
 // Load Config Form
 async function loadConfig() {
   try {
@@ -224,21 +221,19 @@ async function loadConfig() {
 
     const form = document.getElementById('configForm');
 
-    // Clear modification tracking
-    modifiedFields.clear();
-
     Object.keys(config).forEach(key => {
       const input = form.querySelector(`[name="${key}"]`);
-      if (input && config[key]) {
-        input.value = config[key];
+      if (!input) return;
 
-        // Add change listener for password fields to track modifications
-        if (input.type === 'password') {
-          input.addEventListener('input', () => {
-            modifiedFields.add(key);
-          }, { once: false });
-        }
+      // Secrets are never put back into the field (the API only returns a
+      // masked prefix anyway). An empty field on save means "keep current".
+      if (input.type === 'password') {
+        input.value = '';
+        input.placeholder = config[key] ? `${config[key]} (saved — leave blank to keep)` : '';
+        return;
       }
+
+      if (config[key]) input.value = config[key];
     });
 
     // Set cron preset
@@ -277,30 +272,37 @@ document.getElementById('configForm').addEventListener('submit', async (e) => {
 
   try {
     const formData = new FormData(e.target);
-    const config = Object.fromEntries(formData.entries());
+    const config = {};
+    for (const [key, value] of formData.entries()) {
+      const trimmed = typeof value === 'string' ? value.trim() : value;
+      if (trimmed !== '') config[key] = trimmed;
+    }
 
-    // Remove password fields that haven't been modified (they contain masked values)
-    const passwordFields = ['PLAID_SECRET', 'ACTUAL_PASSWORD'];
-    passwordFields.forEach(field => {
-      if (!modifiedFields.has(field)) {
-        delete config[field];
+    const saveBtn = e.target.querySelector('[type="submit"]');
+    const originalLabel = saveBtn ? saveBtn.textContent : '';
+    if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = 'Validating...'; }
+
+    try {
+      // The server checks changed Plaid credentials against Plaid before
+      // writing anything; a rejection leaves config.json untouched.
+      const res = await fetch('/admin/api/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(config)
+      });
+      const result = await res.json().catch(() => ({}));
+
+      if (!res.ok || !result.success) {
+        throw new Error(result.error || `Failed to save configuration (HTTP ${res.status})`);
       }
-    });
 
-    const res = await fetch('/admin/api/config', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(config)
-    });
-
-    if (res.ok) {
-      showToast('Configuration saved! Restart container for changes to take effect.', 'success');
+      showToast('Configuration saved! Restart container for cron schedule changes to take effect.', 'success');
       setTimeout(() => {
         loadDashboard();
         loadConfig();
       }, 1000);
-    } else {
-      throw new Error('Failed to save configuration');
+    } finally {
+      if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = originalLabel; }
     }
   } catch (error) {
     console.error('Error saving config:', error);
