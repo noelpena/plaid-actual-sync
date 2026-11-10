@@ -39,9 +39,51 @@ document.addEventListener('DOMContentLoaded', function() {
       serverURL: document.getElementById('serverURL').value.trim(),
       password: document.getElementById('password').value,
       syncId: document.getElementById('syncId').value.trim(),
-      cronSchedule: document.getElementById('cronSchedule').value.trim() || '0 2 * * *'
+      cronSchedule: document.getElementById('cronSchedule').value.trim() || '0 2 * * *',
+      webhookUrl: document.getElementById('webhookUrl').value.trim(),
+      webhookSecret: document.getElementById('webhookSecret').value.trim()
     };
   }
+
+  function isHttpUrl(value) {
+    try {
+      return ['http:', 'https:'].includes(new URL(value).protocol);
+    } catch {
+      return false;
+    }
+  }
+
+  // Send a test event to the webhook URL in the form
+  document.getElementById('test-webhook').addEventListener('click', async function() {
+    const { webhookUrl, webhookSecret } = getFormData();
+    if (!webhookUrl) {
+      showStatus('Enter a webhook URL to test', 'error');
+      return;
+    }
+    if (!isHttpUrl(webhookUrl)) {
+      showStatus('Invalid webhook URL. Include http:// or https://', 'error');
+      return;
+    }
+
+    showLoading('Sending test webhook...');
+    try {
+      const response = await fetch(`${BASE_URL}/api/test/webhook`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: webhookUrl, secret: webhookSecret })
+      });
+      const result = await response.json();
+      if (result.success) {
+        showStatus(`✅ ${result.message}`, 'success');
+      } else {
+        showStatus(`❌ Webhook test failed: ${result.error}`, 'error');
+      }
+    } catch (error) {
+      showStatus(`❌ Webhook test failed: ${error.message}`, 'error');
+    } finally {
+      hideLoading();
+    }
+  });
 
   // Test connection to Actual Budget
   testButton.addEventListener('click', async function() {
@@ -97,6 +139,11 @@ document.addEventListener('DOMContentLoaded', function() {
       new URL(formData.serverURL);
     } catch {
       showStatus('Invalid Server URL format. Include http:// or https://', 'error');
+      return;
+    }
+
+    if (formData.webhookUrl && !isHttpUrl(formData.webhookUrl)) {
+      showStatus('Invalid webhook URL. Include http:// or https://', 'error');
       return;
     }
 

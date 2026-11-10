@@ -146,6 +146,8 @@ Everything is stored in `config/config.json` (created by the setup wizard). Envi
 | `ACTUAL_PASSWORD` | `actual.password` |
 | `ACTUAL_SYNC_ID` | `actual.syncId` |
 | `CRON_SCHEDULE` | `sync.cronSchedule` |
+| `SYNC_WEBHOOK_URL` | `sync.webhookUrl` (optional — see [Sync Webhook](#-sync-webhook)) |
+| `SYNC_WEBHOOK_SECRET` | `sync.webhookSecret` (optional) |
 
 Bank connections (`items`, holding access tokens and sync cursors) and account `mappings` are managed by the app — see [config/config.json.example](config/config.json.example) for the full schema.
 
@@ -158,12 +160,42 @@ Bank connections (`items`, holding access tokens and sync cursors) and account `
 | Twice daily (8 AM, 8 PM) | `0 8,20 * * *` |
 | Weekly (Monday midnight) | `0 0 * * 1` |
 
+## 📣 Sync Webhook
+
+Optional and off by default. When a webhook URL is set, the app POSTs a JSON summary after **every** sync: scheduled, **Sync Now**, per-mapping sync/reconcile, and `npm run sync`. It fires whether the sync succeeds or fails. Use it to ping Home Assistant, ntfy, Healthchecks.io, n8n, or your own endpoint.
+
+Set it in the setup wizard or **Admin → Configuration → Sync Webhook**. You can also set `SYNC_WEBHOOK_URL` / `SYNC_WEBHOOK_SECRET`; as with the other settings, values in `config.json` take priority. **Send test** posts a `webhook.test` event so you can check your endpoint.
+
+```http
+POST <your URL>
+Content-Type: application/json
+X-Webhook-Secret: <your secret>      # only sent when a secret is configured
+
+{
+  "event": "sync.completed",          // "webhook.test" for the Send test button
+  "version": 1,                       // payload schema version
+  "status": "success",                // "success" | "partial" | "error"
+  "startedAt": "2026-10-19T08:00:00.012Z",
+  "finishedAt": "2026-10-19T08:00:06.481Z",
+  "added": 12,                        // transactions added in Actual
+  "modified": 3,                      // transactions updated in Actual
+  "removed": 1,                       // removed/reversed transactions deleted from Actual
+  "error": null                       // error message when status isn't "success"
+}
+```
+
+- **Privacy:** the payload never includes transaction, account, or institution details. It contains only the fields above.
+- **Best-effort:** delivery has a 5-second timeout and is not retried. Redirects are not followed, so the secret can't be forwarded to another host. A failed delivery is logged but never affects the sync.
+- **No secrets in logs:** the webhook URL and secret are never written to logs or sync history. The admin UI masks the secret. Many webhook URLs contain a token, so treat the URL as a secret too.
+- **Verifying requests:** compare the `X-Webhook-Secret` header with your secret. Serve the endpoint over HTTPS if it isn't on your LAN.
+- `partial` means some bank connections synced and others failed. `error` means nothing synced, or the run failed before it started (bad config, Actual unreachable).
+
 ## 📊 Admin Dashboard
 
 Open `http://localhost:8001/admin`:
 
 - **Dashboard** — sync status, setup health, connection slot usage
-- **Configuration** — edit Plaid/Actual credentials and the sync schedule
+- **Configuration** — edit Plaid/Actual credentials, the sync schedule, and the optional sync webhook
 - **Account Mappings** — bank connections list (repair/remove), account-to-account pairing, per-mapping sync/reconcile
 - **Sync Logs** — last 50 sync runs with per-mapping stats
 
@@ -184,6 +216,7 @@ When a bank login breaks (changed password, expired MFA), the connection and its
 | `POST` | `/api/plaid/items/:id/remove` | Disconnect a bank (⚠️ doesn't refund Trial slots) |
 | `POST` | `/api/test/plaid` | Verify Plaid credentials |
 | `POST` | `/api/test/actual` | Verify Actual Budget connection |
+| `POST` | `/api/test/webhook` | Send a `webhook.test` event (`{url?, secret?}`; falls back to saved settings) |
 | `GET/POST/PATCH/DELETE` | `/api/mappings[...]` | Manage account mappings |
 | `POST` | `/api/mappings/:id/sync` | Sync one mapping (syncs its whole Item) |
 | `POST` | `/api/mappings/:id/reconcile` | Reconcile one mapping to the bank balance |
@@ -274,6 +307,8 @@ curl http://localhost:8001/sync-logs
 ├── server.js           # Express server: web UI, admin API, cron scheduler
 ├── sync.js             # Sync engine: cursor sync → transform → import → reconcile
 ├── plaid.js            # Plaid API client (link tokens, exchange, /transactions/sync)
+├── webhook.js          # Optional sync-completion webhook
+├── test/               # Unit tests (npm test)
 ├── static/             # Web UI (connect, setup wizard, admin dashboard)
 ├── config/             # config.json (created by setup wizard)
 ├── logs/               # sync.log
@@ -294,6 +329,7 @@ git clone https://github.com/noelpena/plaid-actual-sync.git
 cd plaid-actual-sync
 npm install
 npm run dev          # requires config/config.json or env vars
+npm test             # unit tests (Node's built-in test runner)
 ```
 
 ## 📄 License

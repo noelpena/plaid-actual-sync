@@ -92,6 +92,38 @@
           </div>
         </div>
 
+        <div class="section">
+          <h2>Sync Webhook (Optional)</h2>
+          <p class="section-description">Get notified after every sync. A JSON summary (status, timestamps, counts, error message — no transaction or account details) is POSTed to this URL. Leave blank to skip; you can add it later in the admin dashboard.</p>
+
+          <div class="form-group">
+            <label for="webhookUrl">Webhook URL</label>
+            <input
+              type="url"
+              id="webhookUrl"
+              name="webhookUrl"
+              placeholder="https://example.com/hooks/sync"
+              autocomplete="off"
+            >
+          </div>
+
+          <div class="form-group">
+            <label for="webhookSecret">Webhook Secret</label>
+            <input
+              type="password"
+              id="webhookSecret"
+              name="webhookSecret"
+              placeholder="Optional"
+              autocomplete="new-password"
+            >
+            <small class="help-text">Sent as the <code>X-Webhook-Secret</code> header so your endpoint can verify the request</small>
+          </div>
+
+          <button type="button" id="test-webhook" class="btn btn-secondary">
+            Send test
+          </button>
+        </div>
+
         <div class="actions">
           <button type="button" id="test-connection" class="btn btn-secondary">
             Test Connection

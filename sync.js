@@ -5,6 +5,7 @@ import path from "path";
 import crypto from "crypto";
 import { fileURLToPath } from "url";
 import { PlaidApiError, transactionsSyncAll } from "./plaid.js";
+import { resolveWebhookConfig, sendSyncWebhook } from "./webhook.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -73,6 +74,7 @@ function loadConfig() {
     mappings,
     sync: {
       cronSchedule: fileConfig.sync?.cronSchedule || process.env.CRON_SCHEDULE || "0 8 * * *",
+      ...resolveWebhookConfig(fileConfig.sync),
     },
   };
 }
@@ -232,6 +234,17 @@ function saveSyncLog(status, message, stats = {}) {
   const logFile = path.join(logDir, "sync.log");
   fs.appendFileSync(logFile, JSON.stringify(logEntry) + "\n");
   console.log(`[${timestamp}] ${status}: ${message}`, stats);
+}
+
+// Fire the optional sync-completion webhook. Never throws — a webhook problem
+// must not affect the sync. Settings are re-read so a failed config load
+// during the sync doesn't suppress the failure notification.
+async function notifyWebhook(result) {
+  try {
+    await sendSyncWebhook(loadConfig().sync, result);
+  } catch (_) {
+    // sendSyncWebhook already swallows its own errors; loadConfig is the only other source
+  }
 }
 
 // Delete transactions from an Actual account whose imported_id is in removedIds.
@@ -498,9 +511,34 @@ async function runItemSync({ item, mappings, plaidConfig, backupDir }) {
   }
 }
 
+// Sum Actual-side counts across mappings, in webhook terms
+function webhookCounts(perMapping) {
+  return perMapping.reduce(
+    (acc, s) => ({
+      added: acc.added + (s.added || 0),
+      modified: acc.modified + (s.updated || 0),
+      removed: acc.removed + (s.deleted || 0),
+    }),
+    { added: 0, modified: 0, removed: 0 }
+  );
+}
+
 // Sync the Item that contains the given mapping. Used by the per-mapping "Sync"
 // button — the whole Item syncs (shared cursor), stats returned for the mapping.
+// The webhook reports counts for the whole Item, since that's what synced.
 async function runSyncForMapping(mappingId) {
+  const startedAt = new Date().toISOString();
+  try {
+    const { stats, perMapping } = await syncItemForMapping(mappingId);
+    await notifyWebhook({ status: "success", startedAt, ...webhookCounts(perMapping) });
+    return stats;
+  } catch (error) {
+    await notifyWebhook({ status: "error", startedAt, error });
+    throw error;
+  }
+}
+
+async function syncItemForMapping(mappingId) {
   const config = loadConfig();
   const mapping = (config.mappings || []).find(m => m.id === mappingId);
   if (!mapping) throw new Error(`Mapping not found: ${mappingId}`);
@@ -533,7 +571,7 @@ async function runSyncForMapping(mappingId) {
     const stats = result.perMapping.find(s => s.mappingId === mappingId)
       || { mappingId, fetched: 0, added: 0, updated: 0, deleted: 0 };
     saveSyncLog("SUCCESS", `Mapping sync: ${mapping.name}`, { mappingId, ...stats });
-    return stats;
+    return { stats, perMapping: result.perMapping };
   } catch (error) {
     if (initOk) { try { await actual.shutdown(); } catch (_) {} }
     saveSyncLog("ERROR", `Mapping sync failed: ${mapping.name}: ${error?.message}`, { mappingId });
@@ -541,8 +579,22 @@ async function runSyncForMapping(mappingId) {
   }
 }
 
-// Main sync — iterates all Items, isolating failures per Item
+// Main sync — iterates all Items, isolating failures per Item.
+// Used by the cron job, the "Sync Now" button and `npm run sync`.
 async function runSync() {
+  const startedAt = new Date().toISOString();
+  try {
+    const outcome = await syncAllItems();
+    await notifyWebhook({ startedAt, ...outcome });
+  } catch (error) {
+    await notifyWebhook({ status: "error", startedAt, error });
+    throw error;
+  }
+}
+
+// Returns { status: 'success'|'partial'|'error', added, modified, removed, error }
+// for item-level failures; throws for run-level failures (config, Actual init).
+async function syncAllItems() {
   console.log("🔄 Starting sync process...");
 
   let initOk = false;
@@ -587,14 +639,14 @@ async function runSync() {
       { fetched: 0, added: 0, updated: 0, deleted: 0, succeeded: 0, failed: 0 }
     );
 
+    let status, problem = null;
     if (totals.failed === 0 && invalid.length === 0) {
-      saveSyncLog("SUCCESS", "Sync completed for all mappings", { ...totals, disabled, perMapping });
+      status = "SUCCESS";
+      saveSyncLog(status, "Sync completed for all mappings", { ...totals, disabled, perMapping });
     } else {
-      saveSyncLog(
-        totals.succeeded > 0 ? "PARTIAL" : "ERROR",
-        `Completed with ${totals.failed} failed, ${invalid.length} invalid, ${disabled.length} disabled`,
-        { ...totals, invalid, disabled, perMapping }
-      );
+      status = totals.succeeded > 0 ? "PARTIAL" : "ERROR";
+      problem = `Completed with ${totals.failed} failed, ${invalid.length} invalid, ${disabled.length} disabled`;
+      saveSyncLog(status, problem, { ...totals, invalid, disabled, perMapping });
     }
 
     console.log("\n📊 Sync summary:");
@@ -602,6 +654,14 @@ async function runSync() {
     console.log(`   Fetched: ${totals.fetched}, Added: ${totals.added}, Updated: ${totals.updated}, Deleted: ${totals.deleted}`);
 
     await actual.shutdown();
+
+    return {
+      status: status.toLowerCase(),
+      added: totals.added,
+      modified: totals.updated,
+      removed: totals.deleted,
+      error: problem,
+    };
   } catch (error) {
     if (initOk) { try { await actual.shutdown(); } catch (_) {} }
     const detail = {

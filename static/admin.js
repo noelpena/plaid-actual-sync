@@ -90,6 +90,9 @@ async function loadDashboard() {
     document.getElementById('configActualServer').textContent = config.ACTUAL_SERVER_URL || 'Not set';
     document.getElementById('configDaysRequested').textContent = `${config.PLAID_DAYS_REQUESTED || 90} days`;
     document.getElementById('configCronSchedule').textContent = config.CRON_SCHEDULE || '0 2 * * *';
+    document.getElementById('configWebhook').textContent = config.SYNC_WEBHOOK_URL
+      ? `Enabled${config.SYNC_WEBHOOK_SECRET ? ' (with secret)' : ''}`
+      : 'Disabled';
 
     renderSetupStatus(status);
   } catch (error) {
@@ -241,6 +244,12 @@ async function loadConfig() {
       }
     });
 
+    // Webhook fields are optional, so reset them even when empty (the loop
+    // above only fills non-empty values)
+    form.querySelector('[name="SYNC_WEBHOOK_URL"]').value = config.SYNC_WEBHOOK_URL || '';
+    form.querySelector('[name="SYNC_WEBHOOK_SECRET"]').value = config.SYNC_WEBHOOK_SECRET || '';
+    document.getElementById('testWebhookResult').textContent = '';
+
     // Set cron preset
     const cronInput = form.querySelector('[name="CRON_SCHEDULE"]');
     const cronPreset = document.getElementById('cronPreset');
@@ -280,7 +289,8 @@ document.getElementById('configForm').addEventListener('submit', async (e) => {
     const config = Object.fromEntries(formData.entries());
 
     // Remove password fields that haven't been modified (they contain masked values)
-    const passwordFields = ['PLAID_SECRET', 'ACTUAL_PASSWORD'];
+    // An emptied SYNC_WEBHOOK_SECRET is sent as "" so the server removes it
+    const passwordFields = ['PLAID_SECRET', 'ACTUAL_PASSWORD', 'SYNC_WEBHOOK_SECRET'];
     passwordFields.forEach(field => {
       if (!modifiedFields.has(field)) {
         delete config[field];
@@ -300,11 +310,54 @@ document.getElementById('configForm').addEventListener('submit', async (e) => {
         loadConfig();
       }, 1000);
     } else {
-      throw new Error('Failed to save configuration');
+      // Surface server-side validation errors (e.g. an invalid webhook URL)
+      throw new Error(errorMessage(await safeJson(res), 'Failed to save configuration'));
     }
   } catch (error) {
     console.error('Error saving config:', error);
     showToast('Error saving configuration: ' + error.message, 'error');
+  }
+});
+
+// The webhook secret is optional and may start out empty, so (unlike the
+// other password fields) its edits are tracked unconditionally.
+document.querySelector('[name="SYNC_WEBHOOK_SECRET"]').addEventListener('input', () => {
+  modifiedFields.add('SYNC_WEBHOOK_SECRET');
+});
+
+// Send a test event using the values currently in the form (unsaved edits
+// included); an untouched secret falls back to the saved one server-side.
+document.getElementById('testWebhookBtn').addEventListener('click', async () => {
+  const btn = document.getElementById('testWebhookBtn');
+  const resultEl = document.getElementById('testWebhookResult');
+  const url = document.querySelector('[name="SYNC_WEBHOOK_URL"]').value.trim();
+  const body = { url };
+  if (modifiedFields.has('SYNC_WEBHOOK_SECRET')) {
+    body.secret = document.querySelector('[name="SYNC_WEBHOOK_SECRET"]').value;
+  }
+
+  btn.disabled = true;
+  resultEl.className = 'text-sm text-gray-500';
+  resultEl.textContent = 'Sending…';
+  try {
+    const res = await fetch('/api/test/webhook', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    const data = await safeJson(res);
+    if (res.ok && data.success) {
+      resultEl.className = 'text-sm status-success';
+      resultEl.textContent = `✅ ${data.message}`;
+    } else {
+      resultEl.className = 'text-sm status-error';
+      resultEl.textContent = `❌ ${errorMessage(data, 'Test failed')}`;
+    }
+  } catch (error) {
+    resultEl.className = 'text-sm status-error';
+    resultEl.textContent = `❌ ${error.message}`;
+  } finally {
+    btn.disabled = false;
   }
 });
 

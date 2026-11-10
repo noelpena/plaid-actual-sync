@@ -29,6 +29,8 @@
     }
   ],
   "sync": {
-    "cronSchedule": "0 8 * * *"
+    "cronSchedule": "0 8 * * *",
+    "webhookUrl": "",
+    "webhookSecret": ""
   }
 }

@@ -24,6 +24,7 @@ import {
   getAccounts,
   removeItem,
 } from "./plaid.js";
+import { isValidWebhookUrl, mergeWebhookSettings, sendTestWebhook } from "./webhook.js";
 
 dotenv.config();
 
@@ -40,7 +41,10 @@ const TRIAL_ITEM_LIMIT = 10;
 const app = express();
 app.use(cors(), express.json({ limit: '50mb' }));
 
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// Placeholder the admin UI shows for a saved secret
+const MASKED = "***";
+
+const UUID_RE =/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // Helper function to check configuration completeness
 function checkConfigStatus() {
@@ -131,6 +135,15 @@ function errMsg(err) {
     try { return JSON.stringify(err.message); } catch (_) { return String(err.message); }
   }
   try { return JSON.stringify(err); } catch (_) { return String(err); }
+}
+
+// Validate optional webhook fields from a request. Returns an error string or null.
+// Empty string = "remove"; undefined = "leave unchanged".
+function webhookFieldError(url, secret) {
+  if (url !== undefined && url !== null && typeof url !== "string") return "Webhook URL must be a string";
+  if (secret !== undefined && secret !== null && typeof secret !== "string") return "Webhook secret must be a string";
+  if (url && url.trim() && !isValidWebhookUrl(url)) return "Webhook URL must be a valid http:// or https:// URL";
+  return null;
 }
 
 // ===== SETUP & STATUS API =====
@@ -379,6 +392,35 @@ app.post("/api/test/plaid", async (req, res) => {
   }
 });
 
+// Send a test event to the sync webhook. Body: { url?, secret? } — values
+// typed into the form (not yet saved) win; otherwise the saved settings are used.
+// The URL and secret are never logged or echoed back.
+app.post("/api/test/webhook", async (req, res) => {
+  try {
+    const { url, secret } = req.body || {};
+    const webhookError = webhookFieldError(url, secret);
+    if (webhookError) return res.status(400).json({ success: false, error: webhookError });
+
+    const saved = loadConfig().sync;
+    const targetUrl = (url && url.trim()) || saved.webhookUrl;
+    if (!targetUrl) {
+      return res.status(400).json({ success: false, error: "No webhook URL configured" });
+    }
+    const targetSecret = typeof secret === "string" && secret !== MASKED ? secret.trim() : saved.webhookSecret;
+
+    const result = await sendTestWebhook({ url: targetUrl, secret: targetSecret });
+    if (result.ok) {
+      console.log(`📣 Test webhook delivered (HTTP ${result.status})`);
+      return res.json({ success: true, status: result.status, message: `Webhook responded with HTTP ${result.status}` });
+    }
+    console.warn(`⚠️  Test webhook failed: ${result.error}`);
+    res.status(502).json({ success: false, status: result.status ?? null, error: result.error });
+  } catch (error) {
+    console.error("Test webhook failed:", error?.name || "Error");
+    res.status(500).json({ success: false, error: "Test webhook failed" });
+  }
+});
+
 // ===== Account mappings API =====
 // Each mapping = one Plaid account paired with one Actual account.
 
@@ -549,13 +591,15 @@ app.delete("/api/mappings/:id", (req, res) => {
 // Save Actual Budget configuration
 app.post("/api/setup/save-actual", (req, res) => {
   try {
-    const { serverURL, password, syncId, cronSchedule } = req.body;
+    const { serverURL, password, syncId, cronSchedule, webhookUrl, webhookSecret } = req.body;
 
     if (!serverURL || !password || !syncId) {
       return res.status(400).json({
         error: "Missing required fields: serverURL, password, syncId"
       });
     }
+    const webhookError = webhookFieldError(webhookUrl, webhookSecret);
+    if (webhookError) return res.status(400).json({ error: webhookError });
 
     const configDir = path.join(__dirname, "config");
     const configPath = path.join(configDir, "config.json");
@@ -584,9 +628,12 @@ app.post("/api/setup/save-actual", (req, res) => {
         password,
         syncId,
       },
-      sync: {
-        cronSchedule: cronSchedule || "0 8 * * *",
-      },
+      // The wizard's webhook fields are optional: blank leaves any existing
+      // webhook settings alone (they aren't pre-filled on re-runs)
+      sync: mergeWebhookSettings(
+        { ...existingConfig.sync, cronSchedule: cronSchedule || "0 8 * * *" },
+        { url: webhookUrl || undefined, secret: webhookSecret || undefined }
+      ),
     };
 
     fs.writeFileSync(configPath, JSON.stringify(newConfig, null, 2));
@@ -888,6 +935,8 @@ app.get("/admin/api/config", (req, res) => {
       ACTUAL_PASSWORD: config.actual?.password ? "***" : "",
       ACTUAL_SYNC_ID: config.actual?.syncId || "",
       CRON_SCHEDULE: config.sync?.cronSchedule || "0 8 * * *",
+      SYNC_WEBHOOK_URL: config.sync?.webhookUrl || "",
+      SYNC_WEBHOOK_SECRET: config.sync?.webhookSecret ? MASKED : "",
     };
     res.json(safeConfig);
   } catch (error) {
@@ -897,6 +946,10 @@ app.get("/admin/api/config", (req, res) => {
 
 app.post("/admin/api/config", (req, res) => {
   try {
+    // SYNC_WEBHOOK_URL: "" clears it. SYNC_WEBHOOK_SECRET: omitted = keep, "" = clear.
+    const webhookError = webhookFieldError(req.body.SYNC_WEBHOOK_URL, req.body.SYNC_WEBHOOK_SECRET);
+    if (webhookError) return res.status(400).json({ error: webhookError });
+
     const configDir = path.join(__dirname, "config");
     const configPath = path.join(configDir, "config.json");
 
@@ -929,9 +982,14 @@ app.post("/admin/api/config", (req, res) => {
         password: req.body.ACTUAL_PASSWORD || existingConfig.actual?.password,
         syncId: req.body.ACTUAL_SYNC_ID,
       },
-      sync: {
-        cronSchedule: req.body.CRON_SCHEDULE || "0 2 * * *",
-      },
+      sync: mergeWebhookSettings(
+        { ...existingConfig.sync, cronSchedule: req.body.CRON_SCHEDULE || "0 2 * * *" },
+        {
+          url: req.body.SYNC_WEBHOOK_URL,
+          // The masked placeholder coming back means "unchanged"
+          secret: req.body.SYNC_WEBHOOK_SECRET === MASKED ? undefined : req.body.SYNC_WEBHOOK_SECRET,
+        }
+      ),
     };
 
     fs.writeFileSync(configPath, JSON.stringify(newConfig, null, 2));

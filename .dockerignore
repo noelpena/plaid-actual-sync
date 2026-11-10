@@ -54,3 +54,7 @@ docker-compose.yml
 # Documentation (saves image size)
 README.md
 LICENSE
+
+# Tests and changelog (not needed at runtime)
+test
+CHANGELOG.md
