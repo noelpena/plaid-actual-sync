@@ -9,6 +9,9 @@ on:
   pull_request:
     branches:
       - main
+  # Weekly rebuild so the image picks up new @actual-app/api releases
+  schedule:
+    - cron: '0 6 * * 1'
   workflow_dispatch:
 
 env:
@@ -37,6 +40,12 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # Build with the latest stable Actual library so the image can open
+      # budgets from up-to-date Actual apps. A concrete version (not "latest")
+      # keeps the layer cache from reusing an old install.
+      - name: Resolve latest @actual-app/api version
+        run: echo "ACTUAL_VERSION=$(npm view @actual-app/api@latest version)" >> "$GITHUB_ENV"
+
       - name: Docker metadata (labels)
         id: meta
         uses: docker/metadata-action@v5
@@ -61,6 +70,7 @@ jobs:
           file: ./Dockerfile
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: ACTUAL_VERSION=${{ env.ACTUAL_VERSION }}
           cache-from: type=gha,scope=${{ env.PLATFORM_PAIR }}
           cache-to: type=gha,mode=max,scope=${{ env.PLATFORM_PAIR }}
           outputs: type=image,name=${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=${{ github.event_name != 'pull_request' }}

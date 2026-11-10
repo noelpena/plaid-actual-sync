@@ -5,6 +5,7 @@ import path from "path";
 import crypto from "crypto";
 import { fileURLToPath } from "url";
 import { PlaidApiError, transactionsSyncAll } from "./plaid.js";
+import { openBudget } from "./actual-budget.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -218,7 +219,7 @@ async function initActual(config) {
   if (!config.actual.syncId) {
     throw new Error("Missing Actual Budget sync ID (config.actual.syncId)");
   }
-  await actual.downloadBudget(config.actual.syncId);
+  await openBudget(actual, config.actual.syncId);
   console.log(`✅ Budget downloaded: syncId=${config.actual.syncId}`);
 }
 

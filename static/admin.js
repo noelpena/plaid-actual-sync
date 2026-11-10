@@ -68,6 +68,7 @@ async function loadDashboard() {
 
       const count = lastLog.stats?.added || 0;
       document.getElementById('lastSyncCount').textContent = count;
+      renderLastSyncError(lastLog);
     } else {
       document.getElementById('lastSyncTime').textContent = 'Never';
       document.getElementById('lastSyncStatus').textContent = 'N/A';
@@ -92,9 +93,36 @@ async function loadDashboard() {
     document.getElementById('configCronSchedule').textContent = config.CRON_SCHEDULE || '0 2 * * *';
 
     renderSetupStatus(status);
+    loadVersions();
   } catch (error) {
     console.error('Error loading dashboard:', error);
     showToast('Error loading dashboard', 'error');
+  }
+}
+
+// Show why the last sync failed, including each failed mapping's message
+function renderLastSyncError(log) {
+  const el = document.getElementById('lastSyncError');
+  if (log.status === 'SUCCESS') {
+    el.classList.add('hidden');
+    return;
+  }
+  const failed = (log.stats?.perMapping || [])
+    .filter(m => !m.ok && m.message)
+    .map(m => `${m.name || m.mappingId}: ${m.message}`);
+  el.textContent = [log.message, ...failed].filter(Boolean).join('\n');
+  el.classList.toggle('hidden', !el.textContent);
+}
+
+// Actual server + library versions (fetched separately; the server lookup can be slow)
+async function loadVersions() {
+  try {
+    const res = await fetch('/admin/api/versions');
+    const { library, server } = await res.json();
+    document.getElementById('configActualLibraryVersion').textContent = library || 'unknown';
+    document.getElementById('configActualServerVersion').textContent = server || 'unreachable';
+  } catch (_) {
+    document.getElementById('configActualServerVersion').textContent = 'unreachable';
   }
 }
 
