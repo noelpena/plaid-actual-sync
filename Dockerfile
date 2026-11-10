@@ -15,6 +15,12 @@ COPY package*.json ./
 # Install npm dependencies
 RUN npm install
 
+# Optional: install a specific @actual-app/api version instead of the one in
+# package.json. CI sets this to the latest stable release; set it yourself when
+# building from source against an older Actual setup.
+ARG ACTUAL_VERSION=
+RUN if [ -n "$ACTUAL_VERSION" ]; then npm install --no-save "@actual-app/api@$ACTUAL_VERSION"; fi
+
 # Copy application files
 COPY . .
 

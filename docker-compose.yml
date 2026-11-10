@@ -4,7 +4,11 @@ services:
     image: noelpena/plaid-actual-sync:latest
 
     # Option 2: build locally from source (comment the image line above, uncomment this)
-    # build: .
+    # build:
+    #   context: .
+    #   args:
+    #     # Optional: pin @actual-app/api (e.g. 26.11.0). Blank = package.json version.
+    #     ACTUAL_VERSION: ${ACTUAL_VERSION:-}
 
     container_name: plaid-actual-sync
     restart: always

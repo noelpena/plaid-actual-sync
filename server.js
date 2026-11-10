@@ -24,6 +24,7 @@ import {
   getAccounts,
   removeItem,
 } from "./plaid.js";
+import { ACTUAL_API_VERSION, openBudget, getActualServerVersion } from "./actual-budget.js";
 
 dotenv.config();
 
@@ -96,7 +97,7 @@ async function initActual() {
 
   // Only download budget if syncId is provided
   if (syncId) {
-    await actual.downloadBudget(syncId);
+    await openBudget(actual, syncId);
     console.log("✅ Connected to Actual Budget and downloaded budget");
   } else {
     console.log("✅ Connected to Actual Budget (no budget downloaded - syncId not configured)");
@@ -696,9 +697,13 @@ app.post("/api/test/actual", async (req, res) => {
     if (syncId) {
       try {
         console.log(`📥 Testing budget download with syncId: ${syncId}...`);
-        await actual.downloadBudget(syncId);
+        await openBudget(actual, syncId);
         console.log("✅ Budget downloaded successfully");
       } catch (downloadError) {
+        // A version mismatch means syncing will fail, so fail the test too.
+        if (downloadError.code === "out-of-sync-migrations" || downloadError.code === "out-of-sync-data") {
+          throw downloadError;
+        }
         console.warn("⚠️  Budget download failed during test (this is OK if budget doesn't exist yet):", downloadError.message);
         // Don't fail the test if budget download fails - just warn
         // The connection itself worked if we got here
@@ -772,7 +777,7 @@ async function ensureActualReady() {
     }
   }
   try {
-    await actual.downloadBudget(config.actual.syncId);
+    await openBudget(actual, config.actual.syncId);
   } catch (e) {
     const msg = errMsg(e).toLowerCase();
     if (!msg.includes("already")) {
@@ -1041,6 +1046,15 @@ app.get("/admin/api/logs", (req, res) => {
   } catch (error) {
     res.status(500).json({ error: errMsg(error) });
   }
+});
+
+// Installed Actual library version and the Actual server's version, for the admin UI
+app.get("/admin/api/versions", async (req, res) => {
+  const config = loadConfig();
+  res.json({
+    library: ACTUAL_API_VERSION,
+    server: await getActualServerVersion(config.actual?.serverURL),
+  });
 });
 
 app.use("/static", express.static(staticDir));
