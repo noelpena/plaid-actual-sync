@@ -55,6 +55,9 @@ docker compose up -d --build
 
 1. Open `http://localhost:8001` — you'll be redirected to the setup flow
 2. **`/connect`**: enter your Plaid client ID + secret + environment, then link a bank through Plaid Link
+   - The credentials are checked against Plaid **before** they're saved — a wrong secret or mismatched environment is rejected and nothing is written
+   - Secrets are per-environment: the Sandbox secret only works with Sandbox, the Production secret only with Production
+   - Need to change them later? Use **Change Plaid credentials** on `/connect` or the **Configuration** tab in `/admin`
    - Sandbox: pick any institution, log in with `user_good` / `pass_good` (or username `user_transactions_dynamic` for realistic transaction data)
 3. **`/setup`**: enter your Actual Budget server URL, password, and budget Sync ID
 4. **`/admin` → Account Mappings**: pair each bank account with an Actual account (create new ones on the fly)
@@ -98,7 +101,9 @@ Each sync run, per bank connection (Plaid "Item"):
 Prebuilt multi-arch images (amd64/arm64) are published to Docker Hub as
 `noelpena/plaid-actual-sync:latest` by CI on every push to `main`.
 [docker-compose.yml](docker-compose.yml) pulls that image by default; uncomment
-`build: .` to build from source instead.
+the `build:` block to build from source instead. CI also rebuilds the image weekly
+with the latest stable `@actual-app/api`, so `docker compose pull` keeps it current
+with Actual releases.
 
 ### Using Docker Compose (Recommended)
 
@@ -134,7 +139,9 @@ docker run -d \
 
 ## 🔧 Configuration
 
-Everything is stored in `config/config.json` (created by the setup wizard). Environment variables act as fallbacks when a config value is missing:
+Everything is stored in `config/config.json` (created by the setup wizard). Environment variables act as fallbacks when a config value is missing — a value in `config.json` always wins, so once credentials have been saved through the UI, env vars for the same keys are ignored.
+
+To configure with env vars instead of the UI, uncomment the matching lines under `environment:` in `docker-compose.yml`. A `.env` file alone isn't enough: it's excluded from the image, so the container only sees variables compose passes through.
 
 | Env var | config.json equivalent |
 |---|---|
@@ -194,7 +201,7 @@ X-Webhook-Secret: <your secret>      # only sent when a secret is configured
 
 Open `http://localhost:8001/admin`:
 
-- **Dashboard** — sync status, setup health, connection slot usage
+- **Dashboard** — sync status (with the reason when the last sync failed), setup health, connection slot usage, Actual server and library versions
 - **Configuration** — edit Plaid/Actual credentials, the sync schedule, and the optional sync webhook
 - **Account Mappings** — bank connections list (repair/remove), account-to-account pairing, per-mapping sync/reconcile
 - **Sync Logs** — last 50 sync runs with per-mapping stats
@@ -275,22 +282,31 @@ The limit is lifetime (removals don't refund). Upgrade to Plaid's Pay-as-you-go 
 - Verify the server URL is reachable **from inside the container** (use container-network hostnames, not `localhost`)
 - Confirm the password and Sync ID
 
-### "SQLITE_CORRUPT" / "malformed database schema" / "No budget file is open"
+### "Your budget was updated by a newer version of Actual"
 
-The `@actual-app/api` package version must **match your Actual server version** — a newer
-SDK migrating a budget file from an older server can corrupt the local copy. This project
-pins it in [package.json](package.json) (currently `^26.7.0`). Check your server version:
+The budget file is newer than the Actual library (`@actual-app/api`) inside this app.
+Whichever Actual app opens your budget upgrades it to that app's version, so this
+usually happens after the Actual desktop app or web app updates. Your server's version
+doesn't matter here: an older server can store a newer budget.
+
+The dashboard shows both versions under **Current Configuration**. To fix it, update
+this app:
 
 ```bash
-curl https://your-actual-server/info      # look at build.version
+docker compose pull && docker compose up -d
 ```
 
-If it differs, edit the `@actual-app/api` line in `package.json` to match, then rebuild
-(`docker compose up -d --build`) and delete the cached budget folder inside `actual-data/`.
+The published image is rebuilt weekly with the latest stable `@actual-app/api`.
 
-> **Hosted Actual (PikaPods, Fly.io, etc.)** auto-updates, so its version can drift ahead of
-> the pin over time. If a sync starts failing with SQLITE errors after a while, re-check
-> `/info` and bump the pin.
+**Building from source:** set `ACTUAL_VERSION` in `.env` to your newest Actual version
+(e.g. `26.11.0`), uncomment the `build:` block in
+[docker-compose.yml](docker-compose.yml), and run `docker compose up -d --build`.
+
+### "SQLITE_CORRUPT" / "malformed database schema"
+
+The local copy of the budget in `actual-data/` is damaged. Stop the container, delete
+the budget folder inside `actual-data/`, and start it again. The budget is downloaded
+again from your server.
 
 ### View detailed logs
 
@@ -307,6 +323,7 @@ curl http://localhost:8001/sync-logs
 ├── server.js           # Express server: web UI, admin API, cron scheduler
 ├── sync.js             # Sync engine: cursor sync → transform → import → reconcile
 ├── plaid.js            # Plaid API client (link tokens, exchange, /transactions/sync)
+├── actual-budget.js    # Opens the Actual budget; version-mismatch errors
 ├── webhook.js          # Optional sync-completion webhook
 ├── test/               # Unit tests (npm test)
 ├── static/             # Web UI (connect, setup wizard, admin dashboard)

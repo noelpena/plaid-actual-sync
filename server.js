@@ -25,6 +25,7 @@ import {
   removeItem,
 } from "./plaid.js";
 import { isValidWebhookUrl, mergeWebhookSettings, sendTestWebhook } from "./webhook.js";
+import { ACTUAL_API_VERSION, openBudget, getActualServerVersion } from "./actual-budget.js";
 
 dotenv.config();
 
@@ -100,7 +101,7 @@ async function initActual() {
 
   // Only download budget if syncId is provided
   if (syncId) {
-    await actual.downloadBudget(syncId);
+    await openBudget(actual, syncId);
     console.log("✅ Connected to Actual Budget and downloaded budget");
   } else {
     console.log("✅ Connected to Actual Budget (no budget downloaded - syncId not configured)");
@@ -148,10 +149,43 @@ function webhookFieldError(url, secret) {
 
 // ===== SETUP & STATUS API =====
 
-// Save Plaid credentials (client ID + secret from the Plaid Dashboard)
-app.post("/api/setup/save-plaid", (req, res) => {
+const trimStr = (v) => (typeof v === "string" ? v.trim() : v);
+
+// Check a candidate Plaid config against Plaid BEFORE anything is written to
+// disk. Creating a link token is free and fails fast on bad keys. Returns null
+// when Plaid accepts the credentials, otherwise a user-facing error string.
+async function validatePlaidCredentials(candidate) {
   try {
-    const { clientId, secret, env, daysRequested } = req.body;
+    await createLinkToken(candidate);
+    return null;
+  } catch (error) {
+    let msg = `Plaid rejected these credentials (${candidate.env}): ${errMsg(error)}.`;
+    if (error instanceof PlaidApiError && error.errorCode === "INVALID_API_KEYS") {
+      msg += ` Secrets are per-environment — make sure this is the ${candidate.env} secret from Developers → Keys.`;
+    }
+    return msg + " Nothing was saved.";
+  }
+}
+
+// Did anything that affects authentication change? daysRequested alone never
+// needs a round-trip to Plaid.
+function plaidAuthChanged(current, candidate) {
+  return (
+    candidate.clientId !== current.clientId ||
+    candidate.secret !== current.secret ||
+    candidate.env !== current.env
+  );
+}
+
+// Save Plaid credentials (client ID + secret from the Plaid Dashboard).
+// Validate-then-save: the request is rejected and config.json left untouched
+// if Plaid does not accept the resulting client ID / secret / env combination.
+app.post("/api/setup/save-plaid", async (req, res) => {
+  try {
+    const clientId = trimStr(req.body.clientId);
+    const secret = trimStr(req.body.secret);
+    const env = trimStr(req.body.env);
+    const { daysRequested } = req.body;
 
     if (!clientId && !secret && !env && !daysRequested) {
       return res.status(400).json({ error: "Provide at least one of: clientId, secret, env, daysRequested" });
@@ -159,15 +193,36 @@ app.post("/api/setup/save-plaid", (req, res) => {
     if (env && !["sandbox", "production"].includes(env)) {
       return res.status(400).json({ error: "env must be 'sandbox' or 'production'" });
     }
-    const days = daysRequested === undefined ? undefined : parseInt(daysRequested);
+    const days = daysRequested === undefined || daysRequested === "" ? undefined : parseInt(daysRequested);
     if (days !== undefined && (!Number.isFinite(days) || days < 30 || days > 730)) {
       return res.status(400).json({ error: "daysRequested must be between 30 and 730" });
     }
 
-    savePlaidConfig({ clientId, secret, env, daysRequested: days });
-    console.log("✅ Plaid credentials saved to config.json");
+    const current = loadConfig().plaid;
+    const candidate = {
+      clientId: clientId || current.clientId,
+      secret: secret || current.secret,
+      env: env || current.env || "sandbox",
+      daysRequested: days ?? current.daysRequested,
+    };
+    if (!candidate.clientId || !candidate.secret) {
+      return res.status(400).json({ error: "Client ID and secret are required" });
+    }
 
-    res.json({ success: true, message: "Plaid configuration saved" });
+    // Always re-check when a secret is explicitly submitted, even if it equals
+    // what's stored: that's how a bad save from an older version gets surfaced.
+    if (secret || plaidAuthChanged(current, candidate)) {
+      const rejection = await validatePlaidCredentials(candidate);
+      if (rejection) {
+        console.error(`❌ Plaid credential check failed (${candidate.env}), nothing saved`);
+        return res.status(400).json({ error: rejection });
+      }
+    }
+
+    savePlaidConfig({ clientId, secret, env, daysRequested: days });
+    console.log(`✅ Plaid credentials validated (${candidate.env}) and saved to config.json`);
+
+    res.json({ success: true, message: "Plaid configuration saved", env: candidate.env });
   } catch (error) {
     console.error("Error saving Plaid configuration:", error);
     res.status(500).json({ error: errMsg(error) });
@@ -689,9 +744,13 @@ app.post("/api/test/actual", async (req, res) => {
     if (syncId) {
       try {
         console.log(`📥 Testing budget download with syncId: ${syncId}...`);
-        await actual.downloadBudget(syncId);
+        await openBudget(actual, syncId);
         console.log("✅ Budget downloaded successfully");
       } catch (downloadError) {
+        // A version mismatch means syncing will fail, so fail the test too.
+        if (downloadError.code === "out-of-sync-migrations" || downloadError.code === "out-of-sync-data") {
+          throw downloadError;
+        }
         console.warn("⚠️  Budget download failed during test (this is OK if budget doesn't exist yet):", downloadError.message);
         // Don't fail the test if budget download fails - just warn
         // The connection itself worked if we got here
@@ -765,7 +824,7 @@ async function ensureActualReady() {
     }
   }
   try {
-    await actual.downloadBudget(config.actual.syncId);
+    await openBudget(actual, config.actual.syncId);
   } catch (e) {
     const msg = errMsg(e).toLowerCase();
     if (!msg.includes("already")) {
@@ -841,6 +900,8 @@ function renderWithPlaidConfig(htmlPath, res) {
   let html = fs.readFileSync(htmlPath, "utf8");
   html = html.replaceAll("{{ plaid_env }}", config.plaid?.env || "sandbox");
   html = html.replaceAll("{{ has_credentials }}", config.plaid?.clientId && config.plaid?.secret ? "true" : "false");
+  // JSON-encoded (quotes included) so the value is always a safe JS string literal
+  html = html.replaceAll('"{{ plaid_client_id }}"', JSON.stringify(config.plaid?.clientId || ""));
   res.type("html").send(html);
 }
 
@@ -944,18 +1005,26 @@ app.get("/admin/api/config", (req, res) => {
   }
 });
 
-app.post("/admin/api/config", (req, res) => {
+app.post("/admin/api/config", async (req, res) => {
   try {
-    // SYNC_WEBHOOK_URL: "" clears it. SYNC_WEBHOOK_SECRET: omitted = keep, "" = clear.
-    const webhookError = webhookFieldError(req.body.SYNC_WEBHOOK_URL, req.body.SYNC_WEBHOOK_SECRET);
-    if (webhookError) return res.status(400).json({ error: webhookError });
-
     const configDir = path.join(__dirname, "config");
     const configPath = path.join(configDir, "config.json");
 
     if (!fs.existsSync(configDir)) {
       fs.mkdirSync(configDir, { recursive: true });
     }
+
+    // Pasted values often carry a trailing newline/space; Plaid rejects those.
+    const body = {};
+    for (const [k, v] of Object.entries(req.body || {})) body[k] = trimStr(v);
+
+    if (body.PLAID_ENV && !["sandbox", "production"].includes(body.PLAID_ENV)) {
+      return res.status(400).json({ error: "PLAID_ENV must be 'sandbox' or 'production'" });
+    }
+
+    // SYNC_WEBHOOK_URL: "" clears it. SYNC_WEBHOOK_SECRET: omitted = keep, "" = clear.
+    const webhookError = webhookFieldError(body.SYNC_WEBHOOK_URL, body.SYNC_WEBHOOK_SECRET);
+    if (webhookError) return res.status(400).json({ error: webhookError });
 
     // Load existing config to preserve sensitive fields if not provided
     let existingConfig = {};
@@ -967,27 +1036,42 @@ app.post("/admin/api/config", (req, res) => {
       }
     }
 
+    const plaid = {
+      ...existingConfig.plaid,
+      clientId: body.PLAID_CLIENT_ID || existingConfig.plaid?.clientId,
+      secret: body.PLAID_SECRET || existingConfig.plaid?.secret,
+      env: body.PLAID_ENV || existingConfig.plaid?.env || "sandbox",
+      daysRequested: parseInt(body.PLAID_DAYS_REQUESTED) || existingConfig.plaid?.daysRequested || 90,
+    };
+
+    // Validate-then-save: if the client ID, secret or env changed, confirm Plaid
+    // accepts the combination before writing anything. A rejected save leaves
+    // config.json exactly as it was (Actual fields included).
+    const current = loadConfig().plaid;
+    if (plaid.clientId && plaid.secret && (body.PLAID_SECRET || plaidAuthChanged(current, plaid))) {
+      const rejection = await validatePlaidCredentials(plaid);
+      if (rejection) {
+        console.error(`❌ Plaid credential check failed (${plaid.env}), configuration not saved`);
+        return res.status(400).json({ error: rejection });
+      }
+      console.log(`✅ Plaid credentials validated (${plaid.env})`);
+    }
+
     const newConfig = {
       ...existingConfig,
-      plaid: {
-        ...existingConfig.plaid,
-        clientId: req.body.PLAID_CLIENT_ID || existingConfig.plaid?.clientId,
-        secret: req.body.PLAID_SECRET || existingConfig.plaid?.secret,
-        env: req.body.PLAID_ENV || existingConfig.plaid?.env || "sandbox",
-        daysRequested: parseInt(req.body.PLAID_DAYS_REQUESTED) || existingConfig.plaid?.daysRequested || 90,
-      },
+      plaid,
       actual: {
         ...(process.env.ACTUAL_DATA_DIR ? { dataDir: process.env.ACTUAL_DATA_DIR } : {}),
-        serverURL: req.body.ACTUAL_SERVER_URL,
-        password: req.body.ACTUAL_PASSWORD || existingConfig.actual?.password,
-        syncId: req.body.ACTUAL_SYNC_ID,
+        serverURL: body.ACTUAL_SERVER_URL,
+        password: body.ACTUAL_PASSWORD || existingConfig.actual?.password,
+        syncId: body.ACTUAL_SYNC_ID,
       },
       sync: mergeWebhookSettings(
-        { ...existingConfig.sync, cronSchedule: req.body.CRON_SCHEDULE || "0 2 * * *" },
+        { ...existingConfig.sync, cronSchedule: body.CRON_SCHEDULE || "0 2 * * *" },
         {
-          url: req.body.SYNC_WEBHOOK_URL,
+          url: body.SYNC_WEBHOOK_URL,
           // The masked placeholder coming back means "unchanged"
-          secret: req.body.SYNC_WEBHOOK_SECRET === MASKED ? undefined : req.body.SYNC_WEBHOOK_SECRET,
+          secret: body.SYNC_WEBHOOK_SECRET === MASKED ? undefined : body.SYNC_WEBHOOK_SECRET,
         }
       ),
     };
@@ -1020,6 +1104,15 @@ app.get("/admin/api/logs", (req, res) => {
   } catch (error) {
     res.status(500).json({ error: errMsg(error) });
   }
+});
+
+// Installed Actual library version and the Actual server's version, for the admin UI
+app.get("/admin/api/versions", async (req, res) => {
+  const config = loadConfig();
+  res.json({
+    library: ACTUAL_API_VERSION,
+    server: await getActualServerVersion(config.actual?.serverURL),
+  });
 });
 
 app.use("/static", express.static(staticDir));

@@ -1,12 +1,15 @@
 // Bank connection flow using Plaid Link.
 //
-// 1. If Plaid credentials are missing, collect and save them (client ID + secret + env).
+// 1. If Plaid credentials are missing (or the user wants to change them), collect
+//    client ID + secret + env. The server validates them against Plaid and only
+//    saves if they work, so a bad secret never gets stuck in config.json.
 // 2. Fetch a link_token server-side, open Plaid Link.
 // 3. onSuccess: exchange the public_token server-side (stores the Item), then
 //    show the accounts straight from Link's metadata — no polling needed.
 
 const PLAID_ENV = window.PLAID_CONFIG?.env || "sandbox";
 const HAS_CREDENTIALS = window.PLAID_CONFIG?.hasCredentials === true;
+const SAVED_CLIENT_ID = window.PLAID_CONFIG?.clientId || "";
 
 const steps = {
   credentials: document.getElementById('credentials-step'),
@@ -54,29 +57,42 @@ document.getElementById('credentialsForm').addEventListener('submit', async (e) 
   }
 
   btn.disabled = true;
-  btn.textContent = 'Saving...';
+  btn.textContent = `Checking with Plaid (${env})...`;
+  hideStatus();
 
   try {
+    // The server tests the credentials against Plaid and only writes them to
+    // config.json if Plaid accepts them. A rejection changes nothing on disk.
     const res = await fetch('/api/setup/save-plaid', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ clientId, secret, env, daysRequested }),
     });
-    const result = await res.json();
-    if (!res.ok || !result.success) throw new Error(result.error || 'Failed to save');
+    const result = await res.json().catch(() => ({}));
+    if (!res.ok || !result.success) throw new Error(result.error || `Failed to save (HTTP ${res.status})`);
 
-    // Verify the credentials actually work (creating a link token is free)
-    const testRes = await fetch('/api/test/plaid', { method: 'POST' });
-    const test = await testRes.json();
-    if (!test.success) throw new Error(`Saved, but Plaid rejected the credentials: ${test.error}`);
-
-    showStatus('✅ Credentials saved! Reloading...', 'success');
+    showStatus(`✅ Plaid accepted the ${env} credentials. Saved — reloading...`, 'success');
     setTimeout(() => window.location.reload(), 800);
   } catch (error) {
     showStatus('❌ ' + error.message, 'error');
     btn.disabled = false;
     btn.textContent = 'Save & Continue';
   }
+});
+
+// Let users re-enter credentials even after some are saved (e.g. wrong
+// environment picked, rotated secret, or a bad save from an older version).
+document.getElementById('changeCredentialsLink').addEventListener('click', (e) => {
+  e.preventDefault();
+  hideStatus();
+  document.getElementById('secret').value = '';
+  showStep('credentials');
+});
+
+document.getElementById('cancelCredentialsLink').addEventListener('click', (e) => {
+  e.preventDefault();
+  hideStatus();
+  showStep('connect');
 });
 
 /* ---------------- Step 2: launch Plaid Link ---------------- */
@@ -193,5 +209,10 @@ const badge = document.getElementById('envBadge');
 badge.textContent = PLAID_ENV;
 badge.classList.add(PLAID_ENV);
 document.getElementById('trialWarning').classList.toggle('hidden', PLAID_ENV !== 'production');
+
+// Pre-fill the credentials form with what's already configured (never the secret)
+document.getElementById('env').value = PLAID_ENV;
+if (SAVED_CLIENT_ID) document.getElementById('clientId').value = SAVED_CLIENT_ID;
+document.getElementById('credentialsCancel').classList.toggle('hidden', !HAS_CREDENTIALS);
 
 showStep(HAS_CREDENTIALS ? 'connect' : 'credentials');

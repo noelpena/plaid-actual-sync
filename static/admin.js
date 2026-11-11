@@ -68,6 +68,7 @@ async function loadDashboard() {
 
       const count = lastLog.stats?.added || 0;
       document.getElementById('lastSyncCount').textContent = count;
+      renderLastSyncError(lastLog);
     } else {
       document.getElementById('lastSyncTime').textContent = 'Never';
       document.getElementById('lastSyncStatus').textContent = 'N/A';
@@ -95,9 +96,36 @@ async function loadDashboard() {
       : 'Disabled';
 
     renderSetupStatus(status);
+    loadVersions();
   } catch (error) {
     console.error('Error loading dashboard:', error);
     showToast('Error loading dashboard', 'error');
+  }
+}
+
+// Show why the last sync failed, including each failed mapping's message
+function renderLastSyncError(log) {
+  const el = document.getElementById('lastSyncError');
+  if (log.status === 'SUCCESS') {
+    el.classList.add('hidden');
+    return;
+  }
+  const failed = (log.stats?.perMapping || [])
+    .filter(m => !m.ok && m.message)
+    .map(m => `${m.name || m.mappingId}: ${m.message}`);
+  el.textContent = [log.message, ...failed].filter(Boolean).join('\n');
+  el.classList.toggle('hidden', !el.textContent);
+}
+
+// Actual server + library versions (fetched separately; the server lookup can be slow)
+async function loadVersions() {
+  try {
+    const res = await fetch('/admin/api/versions');
+    const { library, server } = await res.json();
+    document.getElementById('configActualLibraryVersion').textContent = library || 'unknown';
+    document.getElementById('configActualServerVersion').textContent = server || 'unreachable';
+  } catch (_) {
+    document.getElementById('configActualServerVersion').textContent = 'unreachable';
   }
 }
 
@@ -216,7 +244,8 @@ async function testActualConnection() {
   }
 }
 
-// Track which sensitive fields have been modified
+// Tracks edits to the webhook secret, so an emptied field (which clears the
+// secret) can be told apart from an untouched masked placeholder.
 const modifiedFields = new Set();
 
 // Load Config Form
@@ -226,28 +255,31 @@ async function loadConfig() {
     const config = await res.json();
 
     const form = document.getElementById('configForm');
-
-    // Clear modification tracking
     modifiedFields.clear();
 
     Object.keys(config).forEach(key => {
       const input = form.querySelector(`[name="${key}"]`);
-      if (input && config[key]) {
-        input.value = config[key];
+      if (!input) return;
 
-        // Add change listener for password fields to track modifications
-        if (input.type === 'password') {
-          input.addEventListener('input', () => {
-            modifiedFields.add(key);
-          }, { once: false });
-        }
+      // Secrets are never put back into the field (the API only returns a
+      // masked prefix anyway). An empty field on save means "keep current".
+      if (input.type === 'password') {
+        input.value = '';
+        input.placeholder = config[key] ? `${config[key]} (saved — leave blank to keep)` : '';
+        return;
       }
+
+      if (config[key]) input.value = config[key];
     });
 
     // Webhook fields are optional, so reset them even when empty (the loop
     // above only fills non-empty values)
     form.querySelector('[name="SYNC_WEBHOOK_URL"]').value = config.SYNC_WEBHOOK_URL || '';
-    form.querySelector('[name="SYNC_WEBHOOK_SECRET"]').value = config.SYNC_WEBHOOK_SECRET || '';
+    // Unlike the other secrets, an emptied webhook secret means "remove it", so
+    // it keeps its masked value and drops the "leave blank to keep" placeholder.
+    const webhookSecretInput = form.querySelector('[name="SYNC_WEBHOOK_SECRET"]');
+    webhookSecretInput.value = config.SYNC_WEBHOOK_SECRET || '';
+    webhookSecretInput.placeholder = '';
     document.getElementById('testWebhookResult').textContent = '';
 
     // Set cron preset
@@ -286,32 +318,46 @@ document.getElementById('configForm').addEventListener('submit', async (e) => {
 
   try {
     const formData = new FormData(e.target);
-    const config = Object.fromEntries(formData.entries());
+    const config = {};
+    for (const [key, value] of formData.entries()) {
+      const trimmed = typeof value === 'string' ? value.trim() : value;
+      if (trimmed !== '') config[key] = trimmed;
+    }
 
-    // Remove password fields that haven't been modified (they contain masked values)
-    // An emptied SYNC_WEBHOOK_SECRET is sent as "" so the server removes it
-    const passwordFields = ['PLAID_SECRET', 'ACTUAL_PASSWORD', 'SYNC_WEBHOOK_SECRET'];
-    passwordFields.forEach(field => {
-      if (!modifiedFields.has(field)) {
-        delete config[field];
+    // Webhook fields are sent even when empty, because "" clears them. The
+    // secret is only sent when edited; otherwise it holds the masked placeholder.
+    config.SYNC_WEBHOOK_URL = config.SYNC_WEBHOOK_URL || '';
+    if (modifiedFields.has('SYNC_WEBHOOK_SECRET')) {
+      config.SYNC_WEBHOOK_SECRET = (formData.get('SYNC_WEBHOOK_SECRET') || '').trim();
+    } else {
+      delete config.SYNC_WEBHOOK_SECRET;
+    }
+
+    const saveBtn = e.target.querySelector('[type="submit"]');
+    const originalLabel = saveBtn ? saveBtn.textContent : '';
+    if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = 'Validating...'; }
+
+    try {
+      // The server checks changed Plaid credentials against Plaid before
+      // writing anything; a rejection leaves config.json untouched.
+      const res = await fetch('/admin/api/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(config)
+      });
+      const result = await res.json().catch(() => ({}));
+
+      if (!res.ok || !result.success) {
+        throw new Error(result.error || `Failed to save configuration (HTTP ${res.status})`);
       }
-    });
 
-    const res = await fetch('/admin/api/config', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(config)
-    });
-
-    if (res.ok) {
-      showToast('Configuration saved! Restart container for changes to take effect.', 'success');
+      showToast('Configuration saved! Restart container for cron schedule changes to take effect.', 'success');
       setTimeout(() => {
         loadDashboard();
         loadConfig();
       }, 1000);
-    } else {
-      // Surface server-side validation errors (e.g. an invalid webhook URL)
-      throw new Error(errorMessage(await safeJson(res), 'Failed to save configuration'));
+    } finally {
+      if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = originalLabel; }
     }
   } catch (error) {
     console.error('Error saving config:', error);

@@ -87,6 +87,7 @@
             <div id="lastSyncCount" class="text-lg font-semibold">Loading...</div>
           </div>
         </div>
+        <div id="lastSyncError" class="hidden mt-4 p-4 border border-red-300 bg-red-50 rounded-lg text-sm text-red-800 whitespace-pre-line"></div>
       </div>
 
       <!-- Setup Status Card -->
@@ -150,6 +151,14 @@
           <div class="flex justify-between py-2 border-b">
             <span class="text-gray-600">Actual Budget Server</span>
             <span id="configActualServer" class="font-mono text-sm">-</span>
+          </div>
+          <div class="flex justify-between py-2 border-b">
+            <span class="text-gray-600">Actual Server Version</span>
+            <span id="configActualServerVersion" class="font-mono text-sm">-</span>
+          </div>
+          <div class="flex justify-between py-2 border-b">
+            <span class="text-gray-600">Actual Library Version</span>
+            <span id="configActualLibraryVersion" class="font-mono text-sm">-</span>
           </div>
           <div class="flex justify-between py-2 border-b">
             <span class="text-gray-600">History Requested at Link</span>
