@@ -24,7 +24,13 @@ import {
   getAccounts,
   removeItem,
 } from "./plaid.js";
-import { isValidWebhookUrl, mergeWebhookSettings, sendTestWebhook } from "./webhook.js";
+import {
+  isSameUrl,
+  isValidWebhookUrl,
+  mergeWebhookSettings,
+  resolveTestTarget,
+  sendTestWebhook,
+} from "./webhook.js";
 import { ACTUAL_API_VERSION, openBudget, getActualServerVersion } from "./actual-budget.js";
 
 dotenv.config();
@@ -448,7 +454,8 @@ app.post("/api/test/plaid", async (req, res) => {
 });
 
 // Send a test event to the sync webhook. Body: { url?, secret? } — values
-// typed into the form (not yet saved) win; otherwise the saved settings are used.
+// typed into the form (not yet saved) win; otherwise the saved settings are
+// used, but the saved secret is only sent to the saved URL.
 // The URL and secret are never logged or echoed back.
 app.post("/api/test/webhook", async (req, res) => {
   try {
@@ -456,14 +463,14 @@ app.post("/api/test/webhook", async (req, res) => {
     const webhookError = webhookFieldError(url, secret);
     if (webhookError) return res.status(400).json({ success: false, error: webhookError });
 
-    const saved = loadConfig().sync;
-    const targetUrl = (url && url.trim()) || saved.webhookUrl;
-    if (!targetUrl) {
-      return res.status(400).json({ success: false, error: "No webhook URL configured" });
-    }
-    const targetSecret = typeof secret === "string" && secret !== MASKED ? secret.trim() : saved.webhookSecret;
+    const target = resolveTestTarget(
+      // The masked placeholder coming back means "use the saved secret"
+      { url, secret: secret === MASKED ? undefined : secret },
+      loadConfig().sync
+    );
+    if (target.error) return res.status(400).json({ success: false, error: target.error });
 
-    const result = await sendTestWebhook({ url: targetUrl, secret: targetSecret });
+    const result = await sendTestWebhook(target);
     if (result.ok) {
       console.log(`📣 Test webhook delivered (HTTP ${result.status})`);
       return res.json({ success: true, status: result.status, message: `Webhook responded with HTTP ${result.status}` });
@@ -715,12 +722,19 @@ app.post("/api/test/actual", async (req, res) => {
     const config = loadConfig();
 
     const serverURL = req.body.serverURL || config.actual?.serverURL;
-    const password = req.body.password || config.actual?.password;
+    // The saved password is only sent to the saved server — otherwise anyone
+    // who can reach this endpoint could name their own server and capture it.
+    const usingSavedServer = isSameUrl(serverURL, config.actual?.serverURL);
+    const password = req.body.password || (usingSavedServer ? config.actual?.password : undefined);
     const syncId = req.body.syncId || config.actual?.syncId;
 
     if (!serverURL || !password) {
+      const differentServer = serverURL && !usingSavedServer && config.actual?.password;
       return res.status(400).json({
-        error: "Actual Budget configuration incomplete. Missing serverURL or password."
+        success: false,
+        error: differentServer
+          ? "Enter the password to test a different server. The saved password is only sent to the saved server."
+          : "Actual Budget configuration incomplete. Missing serverURL or password."
       });
     }
 

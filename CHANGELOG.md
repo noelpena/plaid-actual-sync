@@ -25,6 +25,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   any other keys in the `sync` section of `config.json`. Before, the whole
   section was replaced.
 
+### Security
+
+- The "Send test" endpoints no longer send saved credentials to a URL supplied
+  in the request. `POST /api/test/webhook` only sends the saved webhook secret
+  to the saved webhook URL. `POST /api/test/actual` only sends the saved Actual
+  password to the saved server URL. Before this, anyone who could reach the
+  admin UI could name their own server and capture either one. To test a
+  different URL or server, type the secret or password again.
+
 ### Notes
 
 - Fully opt-in. Existing `config.json` files work unchanged, and nothing is

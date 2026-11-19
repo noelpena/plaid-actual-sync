@@ -171,7 +171,7 @@ Bank connections (`items`, holding access tokens and sync cursors) and account `
 
 Optional and off by default. When a webhook URL is set, the app POSTs a JSON summary after **every** sync: scheduled, **Sync Now**, per-mapping sync/reconcile, and `npm run sync`. It fires whether the sync succeeds or fails. Use it to ping Home Assistant, ntfy, Healthchecks.io, n8n, or your own endpoint.
 
-Set it in the setup wizard or **Admin → Configuration → Sync Webhook**. You can also set `SYNC_WEBHOOK_URL` / `SYNC_WEBHOOK_SECRET`; as with the other settings, values in `config.json` take priority. **Send test** posts a `webhook.test` event so you can check your endpoint.
+Set it in the setup wizard or **Admin → Configuration → Sync Webhook**. You can also set `SYNC_WEBHOOK_URL` / `SYNC_WEBHOOK_SECRET`; as with the other settings, values in `config.json` take priority. **Send test** posts a `webhook.test` event so you can check your endpoint. To test a different URL than the saved one, type the secret again (or clear it): the saved secret is only ever sent to the saved URL.
 
 ```http
 POST <your URL>
@@ -222,8 +222,8 @@ When a bank login breaks (changed password, expired MFA), the connection and its
 | `GET` | `/api/plaid/items` | List bank connections |
 | `POST` | `/api/plaid/items/:id/remove` | Disconnect a bank (⚠️ doesn't refund Trial slots) |
 | `POST` | `/api/test/plaid` | Verify Plaid credentials |
-| `POST` | `/api/test/actual` | Verify Actual Budget connection |
-| `POST` | `/api/test/webhook` | Send a `webhook.test` event (`{url?, secret?}`; falls back to saved settings) |
+| `POST` | `/api/test/actual` | Verify Actual Budget connection (the saved password is only sent to the saved server) |
+| `POST` | `/api/test/webhook` | Send a `webhook.test` event (`{url?, secret?}`; the saved secret is only sent to the saved URL) |
 | `GET/POST/PATCH/DELETE` | `/api/mappings[...]` | Manage account mappings |
 | `POST` | `/api/mappings/:id/sync` | Sync one mapping (syncs its whole Item) |
 | `POST` | `/api/mappings/:id/reconcile` | Reconcile one mapping to the bank balance |

@@ -37,6 +37,33 @@ export function isValidWebhookUrl(url) {
   }
 }
 
+// True when two URLs point at the same endpoint. Normalized, so differences
+// like a trailing slash or host casing don't count.
+export function isSameUrl(a, b) {
+  if (typeof a !== "string" || typeof b !== "string" || !a.trim() || !b.trim()) return false;
+  try {
+    return new URL(a.trim()).href === new URL(b.trim()).href;
+  } catch (_) {
+    return a.trim() === b.trim();
+  }
+}
+
+// Decide where the "Send test" button posts and with which secret. A secret
+// typed into the form wins. The saved secret is only ever sent to the saved
+// URL, so a request naming some other URL can't be used to capture it.
+// Returns { url, secret } or { error }.
+export function resolveTestTarget({ url, secret } = {}, saved = {}) {
+  const requestedUrl = typeof url === "string" ? url.trim() : "";
+  const targetUrl = requestedUrl || saved.webhookUrl || "";
+  if (!targetUrl) return { error: "No webhook URL configured" };
+  if (typeof secret === "string") return { url: targetUrl, secret: secret.trim() };
+  if (!saved.webhookSecret) return { url: targetUrl, secret: "" };
+  if (isSameUrl(targetUrl, saved.webhookUrl)) return { url: targetUrl, secret: saved.webhookSecret };
+  return {
+    error: "Re-enter the webhook secret (or clear it) to test a different URL. The saved secret is only sent to the saved URL.",
+  };
+}
+
 // Merge webhook edits into an existing `sync` section of config.json.
 // - url/secret undefined → keep the existing value
 // - "" → remove the key (fall back to env / disabled)

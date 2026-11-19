@@ -6,9 +6,11 @@ import {
   WEBHOOK_TEST_EVENT,
   WEBHOOK_PAYLOAD_VERSION,
   buildWebhookPayload,
+  isSameUrl,
   isValidWebhookUrl,
   mergeWebhookSettings,
   postWebhook,
+  resolveTestTarget,
   resolveWebhookConfig,
   sendSyncWebhook,
   sendTestWebhook,
@@ -115,6 +117,74 @@ describe("isValidWebhookUrl", () => {
     assert.equal(isValidWebhookUrl("not a url"), false);
     assert.equal(isValidWebhookUrl(""), false);
     assert.equal(isValidWebhookUrl(undefined), false);
+  });
+});
+
+describe("isSameUrl", () => {
+  test("ignores trailing slash and host case", () => {
+    assert.equal(isSameUrl("http://Actual.local:5006", "http://actual.local:5006/"), true);
+    assert.equal(isSameUrl(" https://a.example/h ", "https://a.example/h"), true);
+  });
+
+  test("different host, port, path or query is a different URL", () => {
+    assert.equal(isSameUrl("https://a.example/h", "https://evil.example/h"), false);
+    assert.equal(isSameUrl("http://a.example:5006", "http://a.example:5007"), false);
+    assert.equal(isSameUrl("https://a.example/h", "https://a.example/h2"), false);
+    assert.equal(isSameUrl("https://a.example/h?t=1", "https://a.example/h?t=2"), false);
+  });
+
+  test("missing values never match", () => {
+    assert.equal(isSameUrl(undefined, undefined), false);
+    assert.equal(isSameUrl("", ""), false);
+    assert.equal(isSameUrl("https://a.example/h", undefined), false);
+  });
+});
+
+describe("resolveTestTarget", () => {
+  const saved = { webhookUrl: "https://saved.example/hook", webhookSecret: "saved-secret" };
+
+  test("no URL in the request → saved URL and saved secret", () => {
+    assert.deepEqual(resolveTestTarget({}, saved), { url: saved.webhookUrl, secret: "saved-secret" });
+    assert.deepEqual(resolveTestTarget({ url: "" }, saved), { url: saved.webhookUrl, secret: "saved-secret" });
+  });
+
+  test("same URL as saved → saved secret is used", () => {
+    assert.deepEqual(
+      resolveTestTarget({ url: "https://SAVED.example/hook" }, saved),
+      { url: "https://SAVED.example/hook", secret: "saved-secret" }
+    );
+  });
+
+  test("different URL without a secret → refused, saved secret never returned", () => {
+    const result = resolveTestTarget({ url: "https://attacker.example/x" }, saved);
+    assert.ok(result.error);
+    assert.equal(result.url, undefined);
+    assert.ok(!JSON.stringify(result).includes("saved-secret"));
+  });
+
+  test("different URL with a typed secret → uses the typed secret", () => {
+    assert.deepEqual(
+      resolveTestTarget({ url: "https://new.example/x", secret: " typed " }, saved),
+      { url: "https://new.example/x", secret: "typed" }
+    );
+  });
+
+  test("different URL with the secret cleared → sends no secret", () => {
+    assert.deepEqual(
+      resolveTestTarget({ url: "https://new.example/x", secret: "" }, saved),
+      { url: "https://new.example/x", secret: "" }
+    );
+  });
+
+  test("no saved secret → any URL can be tested", () => {
+    assert.deepEqual(
+      resolveTestTarget({ url: "https://new.example/x" }, { webhookUrl: saved.webhookUrl, webhookSecret: "" }),
+      { url: "https://new.example/x", secret: "" }
+    );
+  });
+
+  test("nothing configured and no URL → error", () => {
+    assert.ok(resolveTestTarget({}, {}).error);
   });
 });
 
